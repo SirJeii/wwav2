@@ -785,6 +785,7 @@
     <style>
         body {
             font-family: 'Inter', sans-serif;
+            background: #f0f2f5;
         }
         #confetti-container {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -824,11 +825,12 @@
         #target-container {
             width: 100%;
             height: 300px;
-            background-color: #111827;
+            background: linear-gradient(to bottom, #1e3a8a, #111827);
             border-radius: 1rem;
             overflow: hidden;
             position: relative;
             cursor: crosshair;
+            border: 2px solid #374151;
         }
         #player-track {
             display: flex;
@@ -845,12 +847,13 @@
             flex-shrink: 0;
             padding: 1rem 2rem;
             margin: 0 1rem;
-            background-color: #3b82f6;
+            background: linear-gradient(to right, #4f46e5, #7c3aed);
             color: white;
             font-size: 1.5rem;
             font-weight: bold;
             border-radius: 0.5rem;
             white-space: nowrap;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
         }
         @keyframes scroll {
             from { transform: translate(0, -50%); }
@@ -860,18 +863,14 @@
             position: absolute;
             width: 60px;
             height: 60px;
-            border: 2px solid red;
-            border-radius: 50%;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
             opacity: 0;
             transition: opacity 0.3s;
+            filter: drop-shadow(0 0 5px #ef4444);
         }
         #crosshair::before, #crosshair::after {
             content: '';
             position: absolute;
-            background-color: red;
+            background-color: #ef4444;
         }
         #crosshair::before {
             width: 100%;
@@ -900,10 +899,11 @@
             position: absolute;
             width: 20px;
             height: 20px;
-            background-color: yellow;
+            background-color: #facc15;
             border-radius: 50%;
             transform: translate(-50%, -50%);
             animation: zap 0.5s ease-out forwards;
+            box-shadow: 0 0 15px 5px #facc15;
         }
         @keyframes zap {
             from { transform: translate(-50%, -50%) scale(0); opacity: 1; }
