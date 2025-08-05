@@ -7,6 +7,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script type="module">
         // Firebase SDK imports
@@ -18,6 +19,7 @@
             // Firebase configuration and initialization
             let app, db, auth;
             let currentUserId, currentSessionId, currentShortCode, sessionUnsubscribe, hostUnsubscribe;
+            let html5QrCode;
 
             // --- App State ---
             let quizData = [];
@@ -60,6 +62,8 @@
             const qrCodeModal = document.getElementById('qr-code-modal');
             const qrCodeContainer = document.getElementById('qr-code-container');
             const qrCodeCloseBtn = document.getElementById('qr-code-close-btn');
+            const qrScannerModal = document.getElementById('qr-scanner-modal');
+            const qrScannerCloseBtn = document.getElementById('qr-scanner-close-btn');
             const showQrBtn = document.getElementById('show-qr-btn');
             const countdownOverlay = document.getElementById('countdown-overlay');
             const countdownText = document.getElementById('countdown-text');
@@ -152,8 +156,14 @@
                 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
                 const sessionRef = doc(db, `artifacts/${appId}/public/data/spinner_sessions`, currentSessionId);
                 const sessionDoc = await getDoc(sessionRef);
-                if (sessionDoc.exists() && sessionDoc.data().hostId === currentUserId) {
-                    await deleteDoc(sessionRef);
+                if (sessionDoc.exists()) {
+                    const sessionData = sessionDoc.data();
+                    if (sessionData.hostId === currentUserId) {
+                        await deleteDoc(sessionRef);
+                    } else {
+                        const updatedPlayers = sessionData.players.filter(p => p.userId !== currentUserId);
+                        await updateDoc(sessionRef, { players: updatedPlayers });
+                    }
                 }
 
                 if(sessionUnsubscribe) sessionUnsubscribe();
@@ -368,6 +378,31 @@
                 notificationModal.classList.remove('hidden');
                 launchConfetti();
             }
+
+            // --- QR Code Scanner ---
+            scanQrBtn.addEventListener('click', () => {
+                qrScannerModal.classList.remove('hidden');
+                html5QrCode = new Html5Qrcode("qr-reader");
+                const qrCodeSuccessCallback = (decodedText, decodedResult) => {
+                    document.getElementById('session-id-input').value = decodedText;
+                    html5QrCode.stop().then(ignore => {
+                        qrScannerModal.classList.add('hidden');
+                    }).catch(err => console.log("Failed to stop QR scanner"));
+                };
+                const config = { fps: 10, qrbox: { width: 250, height: 250 } };
+                html5QrCode.start({ facingMode: "environment" }, config, qrCodeSuccessCallback)
+                    .catch(err => showAlert("Unable to start QR scanner. Please grant camera permissions."));
+            });
+
+            qrScannerCloseBtn.addEventListener('click', () => {
+                if (html5QrCode && html5QrCode.isScanning) {
+                    html5QrCode.stop().then(ignore => {
+                        qrScannerModal.classList.add('hidden');
+                    }).catch(err => console.log("Failed to stop QR scanner"));
+                } else {
+                    qrScannerModal.classList.add('hidden');
+                }
+            });
 
             // --- Target Practice Logic ---
             function initializeTargetPractice(sessionData) {
@@ -1074,6 +1109,13 @@
             <h2 class="text-2xl font-bold mb-4">Scan to Join</h2>
             <div id="qr-code-container" class="flex justify-center"></div>
             <button id="qr-code-close-btn" class="mt-6 bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-8 rounded-lg">Close</button>
+        </div>
+    </div>
+    <div id="qr-scanner-modal" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
+        <div class="bg-white p-8 rounded-2xl shadow-2xl text-center w-full max-w-md">
+            <h2 class="text-2xl font-bold mb-4">Scan Session QR Code</h2>
+            <div id="qr-reader" class="w-full"></div>
+            <button id="qr-scanner-close-btn" class="mt-6 bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-8 rounded-lg">Cancel</button>
         </div>
     </div>
 
