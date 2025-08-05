@@ -6,6 +6,7 @@
     <title>Quiz & Spin Wheel Creator</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script type="module">
         // Firebase SDK imports
@@ -20,12 +21,12 @@
 
             // --- App State ---
             let quizData = [];
-            let playerNames = []; // Used for the spinner wheel
+            let playerNames = []; 
             let currentAnswer = '';
             let availableQuestionIds = [];
             let currentLadderIndex = 0;
-            let currentRotation = 0;
-            const wheelColors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1', '#f97316'];
+            let lastKnownPlayers = [];
+            let targetPracticeState = { intervalId: null, crosshairIntervalId: null };
 
             // --- Page Elements ---
             const allPages = {
@@ -42,11 +43,13 @@
             const goToSpinnerBtn = document.getElementById('go-to-spinner-btn');
             const createSessionBtn = document.getElementById('create-session-btn');
             const joinSessionBtn = document.getElementById('join-session-btn');
-            const spinBtn = document.getElementById('spin-btn');
+            const scanQrBtn = document.getElementById('scan-qr-btn');
+            const fireBtn = document.getElementById('fire-btn');
             const sessionIdDisplay = document.getElementById('session-id-display');
             const playerList = document.getElementById('player-list');
-            const spinnerContainer = document.getElementById('spinner-container');
-            const spinnerCanvas = document.getElementById('spinner-canvas');
+            const targetContainer = document.getElementById('target-container');
+            const playerTrack = document.getElementById('player-track');
+            const crosshair = document.getElementById('crosshair');
             const spinnerSubtitle = document.getElementById('spinner-subtitle');
             const notificationModal = document.getElementById('notification-modal');
             const notificationText = document.getElementById('notification-text');
@@ -54,6 +57,12 @@
             const alertModal = document.getElementById('alert-modal');
             const alertText = document.getElementById('alert-text');
             const alertCloseBtn = document.getElementById('alert-close-btn');
+            const qrCodeModal = document.getElementById('qr-code-modal');
+            const qrCodeContainer = document.getElementById('qr-code-container');
+            const qrCodeCloseBtn = document.getElementById('qr-code-close-btn');
+            const showQrBtn = document.getElementById('show-qr-btn');
+            const countdownOverlay = document.getElementById('countdown-overlay');
+            const countdownText = document.getElementById('countdown-text');
             const questionsContainer = document.getElementById('questions-container');
             const addQuestionBtn = document.getElementById('add-question-btn');
             const deleteAllBtn = document.getElementById('delete-all-btn');
@@ -143,6 +152,16 @@
                 showPage('home');
             });
             notificationCloseBtn.addEventListener('click', () => notificationModal.classList.add('hidden'));
+            qrCodeCloseBtn.addEventListener('click', () => qrCodeModal.classList.add('hidden'));
+            showQrBtn.addEventListener('click', () => {
+                qrCodeContainer.innerHTML = '';
+                new QRCode(qrCodeContainer, {
+                    text: currentSessionId,
+                    width: 256,
+                    height: 256,
+                });
+                qrCodeModal.classList.remove('hidden');
+            });
 
             // --- Session Management ---
             createSessionBtn.addEventListener('click', async () => {
@@ -165,8 +184,7 @@
                         hostId: auth.currentUser.uid,
                         players: [{ userId: auth.currentUser.uid, name }],
                         selectedPlayer: null,
-                        lastSpin: null,
-                        rotation: 0,
+                        gameState: 'waiting', // waiting, running, finished
                     });
 
                     currentSessionId = newSessionDoc.id;
@@ -204,9 +222,12 @@
                             showAlert("Authentication error. Please refresh.");
                             return;
                         }
-                        await updateDoc(sessionRef, {
-                            players: arrayUnion({ userId: auth.currentUser.uid, name })
-                        });
+                        const currentPlayers = sessionDoc.data().players || [];
+                        if (!currentPlayers.some(p => p.userId === auth.currentUser.uid)) {
+                             await updateDoc(sessionRef, {
+                                players: arrayUnion({ userId: auth.currentUser.uid, name })
+                            });
+                        }
                     }
                     
                     currentSessionId = sessionId;
@@ -220,16 +241,7 @@
 
                         playerNames = sessionData.players;
                         updateLobbyUI(sessionData);
-                        drawWheel();
-
-                        // Sync wheel rotation
-                        if (spinnerCanvas.style.transform !== `rotate(${sessionData.rotation}deg)`) {
-                             spinnerCanvas.style.transform = `rotate(${sessionData.rotation}deg)`;
-                        }
-
-                        if (sessionData.selectedPlayer && sessionData.lastSpin) {
-                            showNotification(sessionData.selectedPlayer);
-                        }
+                        handleGameState(sessionData);
                     });
                 } catch (error) {
                     console.error("Error joining session: ", error);
@@ -241,27 +253,46 @@
                 playerList.innerHTML = '';
                 sessionData.players.forEach(p => {
                     const li = document.createElement('li');
-                    li.className = 'bg-gray-200 p-2 rounded';
-                    li.textContent = p.name;
+                    li.className = 'player-list-item bg-gray-200 p-3 rounded-lg text-lg transition-all duration-300';
+                    li.dataset.userId = p.userId;
+
+                    const nameSpan = document.createElement('span');
+                    nameSpan.textContent = p.name;
+                    li.appendChild(nameSpan);
+
                     if (p.userId === sessionData.hostId) {
-                        li.textContent += ' (Host)';
-                        li.classList.add('font-bold');
+                        const hostTag = document.createElement('span');
+                        hostTag.textContent = ' (Host)';
+                        hostTag.className = 'font-bold text-purple-600';
+                        li.appendChild(hostTag);
                     }
                     playerList.appendChild(li);
+                    
+                    // Animate new players
+                    if (!lastKnownPlayers.includes(p.userId)) {
+                        li.classList.add('new-player-animation');
+                    }
                 });
+                lastKnownPlayers = sessionData.players.map(p => p.userId);
 
                 if (currentUserId === sessionData.hostId) {
-                    spinnerContainer.classList.remove('hidden');
-                    spinBtn.classList.remove('hidden');
-                    spinnerSubtitle.textContent = "Click the button to spin the wheel!";
+                    fireBtn.classList.remove('hidden');
+                    showQrBtn.classList.remove('hidden');
                 } else {
-                    spinnerContainer.classList.remove('hidden'); // All users should see the wheel
-                    spinBtn.classList.add('hidden');
-                    spinnerSubtitle.textContent = "Waiting for the host to spin...";
+                    fireBtn.classList.add('hidden');
+                    showQrBtn.classList.add('hidden');
                 }
             }
 
             function showNotification(selectedPlayer) {
+                 // Highlight winner in the list
+                document.querySelectorAll('.player-list-item').forEach(item => {
+                    item.classList.remove('winner-spotlight');
+                    if (item.dataset.userId === selectedPlayer.userId) {
+                        item.classList.add('winner-spotlight');
+                    }
+                });
+
                 if (selectedPlayer.userId === currentUserId) {
                     notificationText.textContent = "You have been selected!";
                 } else {
@@ -271,82 +302,100 @@
                 launchConfetti();
             }
 
-            // --- Spinner Logic ---
-            function drawWheel() {
-                if (!spinnerCanvas) return;
-                const ctx = spinnerCanvas.getContext('2d');
-                const numSegments = playerNames.length;
-                if (numSegments === 0) {
-                    ctx.clearRect(0,0, spinnerCanvas.width, spinnerCanvas.height);
-                    return;
-                };
+            // --- Target Practice Logic ---
+            function initializeTargetPractice(sessionData) {
+                playerTrack.innerHTML = '';
+                const eligiblePlayers = sessionData.players.filter(p => p.userId !== sessionData.hostId);
                 
-                const anglePerSegment = (2 * Math.PI) / numSegments;
-                const radius = spinnerCanvas.width / 2;
+                // Duplicate players to make the track feel full and continuous
+                const displayPlayers = [...eligiblePlayers, ...eligiblePlayers, ...eligiblePlayers];
 
-                ctx.clearRect(0, 0, spinnerCanvas.width, spinnerCanvas.height);
-                ctx.font = 'bold 20px Inter, sans-serif';
-                ctx.save();
-                ctx.translate(radius, radius);
-                
-                playerNames.forEach((player, i) => {
-                    const startAngle = i * anglePerSegment;
-                    const endAngle = startAngle + anglePerSegment;
-
-                    ctx.beginPath();
-                    ctx.moveTo(0, 0);
-                    ctx.arc(0, 0, radius - 10, startAngle, endAngle);
-                    ctx.closePath();
-                    
-                    ctx.fillStyle = wheelColors[i % wheelColors.length];
-                    ctx.fill();
-                    ctx.stroke();
-
-                    ctx.save();
-                    ctx.fillStyle = 'white';
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'middle';
-                    ctx.rotate(startAngle + anglePerSegment / 2);
-                    const text = player.name.length > 12 ? player.name.substring(0, 10) + '...' : player.name;
-                    ctx.fillText(text, radius * 0.6, 0);
-                    ctx.restore();
+                displayPlayers.forEach(p => {
+                    const playerDiv = document.createElement('div');
+                    playerDiv.className = 'player-target';
+                    playerDiv.textContent = p.name;
+                    playerDiv.dataset.userId = p.userId;
+                    playerTrack.appendChild(playerDiv);
                 });
-                ctx.restore();
             }
 
-            spinBtn.addEventListener('click', async () => {
-                if (playerNames.length < 2) {
-                    showAlert("You need at least 2 players to spin the wheel.");
-                    return;
+            function handleGameState(sessionData) {
+                initializeTargetPractice(sessionData);
+                if (sessionData.gameState === 'running') {
+                    playerTrack.classList.add('scrolling');
+                    crosshair.classList.add('moving');
+                    spinnerSubtitle.textContent = "Get ready!";
+                    fireBtn.textContent = "STOP";
+                } else if (sessionData.gameState === 'finished') {
+                    playerTrack.classList.remove('scrolling');
+                    crosshair.classList.remove('moving');
+                    spinnerSubtitle.textContent = `Selected: ${sessionData.selectedPlayer.name}`;
+                    fireBtn.textContent = "AGAIN!";
+                    showNotification(sessionData.selectedPlayer);
+                } else { // waiting
+                    playerTrack.classList.remove('scrolling');
+                    crosshair.classList.remove('moving');
+                    spinnerSubtitle.textContent = "Waiting for host to start...";
+                    fireBtn.textContent = "START";
                 }
+            }
 
-                spinBtn.disabled = true;
-                spinnerSubtitle.textContent = "Spinning...";
-
-                const spinAngle = Math.random() * 360 + 360 * 5;
-                currentRotation += spinAngle;
-                
-                const numSegments = playerNames.length;
-                const finalAngle = currentRotation % 360;
-                const anglePerSegment = 360 / numSegments;
-                // The pointer is at the top (0 degrees), so we adjust the calculation
-                const winningSegmentIndex = Math.floor((360 - finalAngle + (anglePerSegment / 2) + 270) % 360 / anglePerSegment);
-                const winner = playerNames[winningSegmentIndex];
-
+            async function startOrStopGame() {
                 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
                 const sessionRef = doc(db, `artifacts/${appId}/public/data/spinner_sessions`, currentSessionId);
-                
-                await updateDoc(sessionRef, {
-                    selectedPlayer: winner,
-                    lastSpin: new Date().toISOString(), // To trigger snapshot
-                    rotation: currentRotation
-                });
-                
-                setTimeout(() => {
-                    spinnerSubtitle.textContent = `The winner is... ${winner.name}!`;
-                    spinBtn.disabled = false;
-                }, 5000);
+                const sessionDoc = await getDoc(sessionRef);
+                const sessionData = sessionDoc.data();
+
+                if (sessionData.gameState === 'running') { // Stop the game
+                    const crosshairRect = crosshair.getBoundingClientRect();
+                    const crosshairCenter = crosshairRect.left + crosshairRect.width / 2;
+
+                    let closestPlayer = null;
+                    let minDistance = Infinity;
+
+                    document.querySelectorAll('.player-target').forEach(target => {
+                        const targetRect = target.getBoundingClientRect();
+                        const targetCenter = targetRect.left + targetRect.width / 2;
+                        const distance = Math.abs(crosshairCenter - targetCenter);
+                        if (distance < minDistance) {
+                            minDistance = distance;
+                            closestPlayer = {
+                                userId: target.dataset.userId,
+                                name: target.textContent
+                            };
+                        }
+                    });
+
+                    if (closestPlayer) {
+                        await updateDoc(sessionRef, {
+                            gameState: 'finished',
+                            selectedPlayer: closestPlayer
+                        });
+                    }
+
+                } else { // Start the game
+                    if (playerNames.filter(p => p.userId !== sessionData.hostId).length < 1) {
+                        showAlert("You need at least one other player to start.");
+                        return;
+                    }
+                    await updateDoc(sessionRef, {
+                        gameState: 'running',
+                        selectedPlayer: null
+                    });
+                }
+            }
+
+            fireBtn.addEventListener('click', startOrStopGame);
+
+            targetContainer.addEventListener('click', (e) => {
+                const zap = document.createElement('div');
+                zap.className = 'zap-effect';
+                zap.style.left = `${e.clientX - targetContainer.getBoundingClientRect().left}px`;
+                zap.style.top = `${e.clientY - targetContainer.getBoundingClientRect().top}px`;
+                targetContainer.appendChild(zap);
+                setTimeout(() => zap.remove(), 500);
             });
+
 
             // --- Quiz Creation Logic (Existing) ---
             const addQuestionField = (question = '', answer = '') => {
@@ -635,16 +684,6 @@
         body {
             font-family: 'Inter', sans-serif;
         }
-        .number-box.visited, .treasure-chest.opened {
-            background-color: #6b7280 !important;
-            cursor: default;
-            transform: scale(0.95);
-            opacity: 0.6;
-        }
-        .number-box.visited:hover {
-            transform: scale(0.95);
-            box-shadow: none;
-        }
         #confetti-container {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             pointer-events: none; overflow: hidden; z-index: 9999;
@@ -656,21 +695,120 @@
         @keyframes fall {
             to { transform: translateY(100vh) rotate(360deg); opacity: 0; }
         }
-        #treasure-map {
-            background-image: url('https://placehold.co/1200x800/fdf6e3/a89c82?text=Treasure+Map');
-            background-size: cover; background-position: center;
+        
+        /* Excitement UI Styles */
+        .new-player-animation { animation: fadeIn 0.5s ease-out; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
         }
-        .ladder-rung { transition: all 0.5s ease-in-out; }
-        .ladder-rung.active {
-            background-color: #f59e0b !important; color: white; transform: scale(1.1);
+
+        .winner-spotlight {
+            animation: spotlight 1.5s ease-in-out infinite;
+            box-shadow: 0 0 15px 5px #f59e0b;
         }
-        #spinner-canvas {
-            transition: transform 5s cubic-bezier(0.25, 0.1, 0.25, 1);
+        @keyframes spotlight {
+            0%, 100% { transform: scale(1.05); background-color: #fef3c7; }
+            50% { transform: scale(1.0); background-color: #fde68a; }
         }
-        #spinner-container::before {
-            content: '▼'; position: absolute; top: -10px; left: 50%;
-            transform: translateX(-50%); font-size: 50px; color: #ef4444; z-index: 10;
+        
+        .countdown-animation { animation: countdown-zoom 1s ease-in-out forwards; }
+        @keyframes countdown-zoom {
+            from { transform: scale(0.5); opacity: 0; }
+            to { transform: scale(1); opacity: 1; }
         }
+
+        /* Target Practice Styles */
+        #target-container {
+            width: 100%;
+            height: 300px;
+            background-color: #111827;
+            border-radius: 1rem;
+            overflow: hidden;
+            position: relative;
+            cursor: crosshair;
+        }
+        #player-track {
+            display: flex;
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            left: 0;
+            animation: scroll 20s linear infinite paused;
+        }
+        #player-track.scrolling {
+            animation-play-state: running;
+        }
+        .player-target {
+            flex-shrink: 0;
+            padding: 1rem 2rem;
+            margin: 0 1rem;
+            background-color: #3b82f6;
+            color: white;
+            font-size: 1.5rem;
+            font-weight: bold;
+            border-radius: 0.5rem;
+            white-space: nowrap;
+        }
+        @keyframes scroll {
+            from { transform: translate(0, -50%); }
+            to { transform: translate(-50%, -50%); }
+        }
+        #crosshair {
+            position: absolute;
+            width: 60px;
+            height: 60px;
+            border: 2px solid red;
+            border-radius: 50%;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        #crosshair::before, #crosshair::after {
+            content: '';
+            position: absolute;
+            background-color: red;
+        }
+        #crosshair::before {
+            width: 100%;
+            height: 2px;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+        #crosshair::after {
+            height: 100%;
+            width: 2px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+        #crosshair.moving {
+            opacity: 1;
+            animation: move-crosshair 5s linear infinite;
+        }
+        @keyframes move-crosshair {
+            0% { top: 50%; left: 20%; }
+            25% { top: 80%; left: 70%; }
+            50% { top: 30%; left: 80%; }
+            75% { top: 60%; left: 30%; }
+            100% { top: 50%; left: 20%; }
+        }
+        .zap-effect {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background-color: yellow;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            animation: zap 0.5s ease-out forwards;
+        }
+        @keyframes zap {
+            from { transform: translate(-50%, -50%) scale(0); opacity: 1; }
+            to { transform: translate(-50%, -50%) scale(3); opacity: 0; }
+        }
+
+
     </style>
 </head>
 <body class="bg-gray-100 text-gray-800">
@@ -682,7 +820,7 @@
             <p class="text-center text-gray-500 mb-8">What would you like to do today?</p>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mt-8">
                 <button id="go-to-quiz-btn" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-12 px-6 rounded-lg transition-transform transform hover:scale-105 text-2xl">Create a Quiz Game</button>
-                <button id="go-to-spinner-btn" class="bg-purple-500 hover:bg-purple-600 text-white font-bold py-12 px-6 rounded-lg transition-transform transform hover:scale-105 text-2xl">Use the Name Spinner</button>
+                <button id="go-to-spinner-btn" class="bg-purple-500 hover:bg-purple-600 text-white font-bold py-12 px-6 rounded-lg transition-transform transform hover:scale-105 text-2xl">Use the Name Selector</button>
             </div>
         </div>
     </div>
@@ -709,9 +847,9 @@
                 <p id="empty-state-message" class="text-center text-gray-400 my-8">Click "Add Question" or "Upload Excel File" to get started!</p>
             </div>
             <div class="flex justify-center items-center mt-8 gap-4">
-                <button id="add-question-btn" class="bg-gray-500 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105">Add Question</button>
-                <button id="delete-all-btn" class="bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105">Delete All</button>
-                <button id="save-quiz-btn" class="bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105">Save & Continue</button>
+                <button id="add-question-btn" class="bg-gray-500 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg">Add Question</button>
+                <button id="delete-all-btn" class="bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-lg">Delete All</button>
+                <button id="save-quiz-btn" class="bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-lg">Save & Continue</button>
             </div>
             <p id="error-message" class="text-red-500 text-center mt-4"></p>
         </div>
@@ -734,7 +872,7 @@
     <div id="session-setup-page" class="hidden min-h-screen flex items-center justify-center p-4">
         <div class="w-full max-w-2xl bg-white p-8 rounded-2xl shadow-lg">
             <div class="flex justify-between items-start mb-6">
-                <h1 class="text-4xl font-bold text-gray-800">Multiplayer Spinner</h1>
+                <h1 class="text-4xl font-bold text-gray-800">Multiplayer Selector</h1>
                 <button id="back-to-home-from-session-setup-btn" class="bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg">Back to Home</button>
             </div>
             <div class="space-y-4 mb-6">
@@ -750,8 +888,9 @@
                 <div class="border p-4 rounded-lg">
                     <h2 class="text-2xl font-bold mb-2">Join a Session</h2>
                     <label for="session-id-input" class="block text-sm font-medium text-gray-700 mb-1">Session ID</label>
-                    <input type="text" id="session-id-input" placeholder="Enter session ID..." class="w-full p-3 border rounded-md mb-4 focus:ring-2 focus:ring-green-500">
+                    <input type="text" id="session-id-input" placeholder="Enter session ID..." class="w-full p-3 border rounded-md mb-2 focus:ring-2 focus:ring-green-500">
                     <button id="join-session-btn" class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-lg">Join</button>
+                    <button id="scan-qr-btn" class="w-full mt-2 bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-lg">Scan QR</button>
                 </div>
             </div>
         </div>
@@ -759,15 +898,19 @@
 
     <!-- Page 3: Session Lobby Page -->
     <div id="session-lobby-page" class="hidden min-h-screen flex items-center justify-center p-4">
-        <div class="w-full max-w-6xl bg-white p-8 rounded-2xl shadow-lg flex flex-col md:flex-row gap-8">
-            <!-- Left Panel: Spinner -->
+        <div class="w-full max-w-6xl bg-white p-8 rounded-2xl shadow-lg flex flex-col md:flex-row gap-8 relative">
+             <div id="countdown-overlay" class="hidden absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center z-20">
+                <span id="countdown-text" class="text-9xl font-bold text-white"></span>
+            </div>
+            <!-- Left Panel: Target Practice -->
             <div class="flex-grow flex flex-col items-center justify-center">
-                <h1 class="text-5xl font-bold text-gray-800 mb-2">Name Spinner</h1>
+                <h1 class="text-5xl font-bold text-gray-800 mb-2">Target Practice</h1>
                 <h2 id="spinner-subtitle" class="text-2xl text-center text-gray-500 mb-10">Waiting for host...</h2>
-                <div id="spinner-container" class="relative flex justify-center items-center">
-                    <canvas id="spinner-canvas" width="400" height="400"></canvas>
+                <div id="target-container" class="relative">
+                    <div id="player-track"></div>
+                    <div id="crosshair"></div>
                 </div>
-                <button id="spin-btn" class="hidden mt-8 bg-purple-500 hover:bg-purple-600 text-white font-bold py-4 px-8 rounded-lg text-xl">SPIN!</button>
+                <button id="fire-btn" class="hidden mt-8 bg-red-500 hover:bg-red-600 text-white font-bold py-4 px-8 rounded-lg text-xl">START</button>
             </div>
             <!-- Right Panel: Session Info -->
             <div class="w-full md:w-1/3 bg-gray-50 p-6 rounded-lg">
@@ -775,6 +918,7 @@
                 <div class="mb-4">
                     <label class="block text-sm font-medium text-gray-500">Session ID</label>
                     <p id="session-id-display" class="text-2xl font-mono bg-gray-200 p-2 rounded break-words"></p>
+                    <button id="show-qr-btn" class="hidden w-full mt-2 bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg">Show QR Code</button>
                 </div>
                 <h3 class="text-2xl font-bold mb-2">Players</h3>
                 <ul id="player-list" class="space-y-2"></ul>
@@ -821,6 +965,13 @@
         <div class="bg-white p-8 rounded-2xl shadow-2xl text-center w-full max-w-sm">
             <p id="alert-text" class="text-xl text-gray-800 mb-6"></p>
             <button id="alert-close-btn" class="bg-purple-500 hover:bg-purple-600 text-white font-bold py-2 px-8 rounded-lg">OK</button>
+        </div>
+    </div>
+    <div id="qr-code-modal" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50">
+        <div class="bg-white p-8 rounded-2xl shadow-2xl text-center">
+            <h2 class="text-2xl font-bold mb-4">Scan to Join</h2>
+            <div id="qr-code-container" class="flex justify-center"></div>
+            <button id="qr-code-close-btn" class="mt-6 bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-8 rounded-lg">Close</button>
         </div>
     </div>
 
