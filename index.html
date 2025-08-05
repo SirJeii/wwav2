@@ -12,12 +12,12 @@
         // Firebase SDK imports
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, getDoc, onSnapshot, updateDoc, arrayUnion, collection, addDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot, updateDoc, arrayUnion, collection, addDoc, query, where, getDocs, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         
         document.addEventListener('DOMContentLoaded', () => {
             // Firebase configuration and initialization
             let app, db, auth;
-            let currentUserId, currentSessionId, sessionUnsubscribe;
+            let currentUserId, currentSessionId, currentShortCode, sessionUnsubscribe, hostUnsubscribe;
 
             // --- App State ---
             let quizData = [];
@@ -63,6 +63,7 @@
             const showQrBtn = document.getElementById('show-qr-btn');
             const countdownOverlay = document.getElementById('countdown-overlay');
             const countdownText = document.getElementById('countdown-text');
+            const fullscreenBtn = document.getElementById('fullscreen-btn');
             const questionsContainer = document.getElementById('questions-container');
             const addQuestionBtn = document.getElementById('add-question-btn');
             const deleteAllBtn = document.getElementById('delete-all-btn');
@@ -147,8 +148,18 @@
             document.getElementById('back-to-home-from-quiz-btn').addEventListener('click', () => showPage('home'));
             document.getElementById('back-to-home-from-session-setup-btn').addEventListener('click', () => showPage('home'));
             document.getElementById('back-to-quiz-creation-btn').addEventListener('click', () => showPage('creation'));
-            document.getElementById('leave-session-btn').addEventListener('click', () => {
+            document.getElementById('leave-session-btn').addEventListener('click', async () => {
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const sessionRef = doc(db, `artifacts/${appId}/public/data/spinner_sessions`, currentSessionId);
+                const sessionDoc = await getDoc(sessionRef);
+                if (sessionDoc.exists() && sessionDoc.data().hostId === currentUserId) {
+                    await deleteDoc(sessionRef);
+                }
+
                 if(sessionUnsubscribe) sessionUnsubscribe();
+                if (document.fullscreenElement) {
+                    document.exitFullscreen();
+                }
                 showPage('home');
             });
             notificationCloseBtn.addEventListener('click', () => notificationModal.classList.add('hidden'));
@@ -156,14 +167,44 @@
             showQrBtn.addEventListener('click', () => {
                 qrCodeContainer.innerHTML = '';
                 new QRCode(qrCodeContainer, {
-                    text: currentSessionId,
+                    text: currentShortCode,
                     width: 256,
                     height: 256,
                 });
                 qrCodeModal.classList.remove('hidden');
             });
+            fullscreenBtn.addEventListener('click', () => {
+                const targetArea = document.getElementById('target-practice-area');
+                if (!document.fullscreenElement) {
+                    targetArea.requestFullscreen().catch(err => {
+                        showAlert(`Error attempting to enable full-screen mode: ${err.message} (${err.name})`);
+                    });
+                } else {
+                    document.exitFullscreen();
+                }
+            });
+            document.addEventListener('fullscreenchange', () => {
+                const lobbyPage = allPages.sessionLobby;
+                if (document.fullscreenElement) {
+                    fullscreenBtn.textContent = 'Exit Fullscreen';
+                    lobbyPage.classList.add('game-fullscreen');
+                } else {
+                    fullscreenBtn.textContent = 'Fullscreen';
+                    lobbyPage.classList.remove('game-fullscreen');
+                }
+            });
+
 
             // --- Session Management ---
+            const generateShortCode = () => {
+                const chars = 'ABCDEFGHIJKLMNPQRSTUVWXYZ123456789';
+                let result = '';
+                for (let i = 0; i < 6; i++) {
+                    result += chars.charAt(Math.floor(Math.random() * chars.length));
+                }
+                return result;
+            }
+
             createSessionBtn.addEventListener('click', async () => {
                 const name = document.getElementById('player-name-input').value.trim();
                 if (!name) {
@@ -179,15 +220,18 @@
                 
                 try {
                     const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                    const shortCode = generateShortCode();
                     const sessionRef = collection(db, `artifacts/${appId}/public/data/spinner_sessions`);
                     const newSessionDoc = await addDoc(sessionRef, {
                         hostId: auth.currentUser.uid,
                         players: [{ userId: auth.currentUser.uid, name }],
                         selectedPlayer: null,
                         gameState: 'waiting', // waiting, running, finished
+                        shortCode: shortCode,
                     });
 
                     currentSessionId = newSessionDoc.id;
+                    currentShortCode = shortCode;
                     joinSession(currentSessionId);
                 } catch (error) {
                     console.error("Error creating session:", error);
@@ -195,14 +239,26 @@
                 }
             });
 
-            joinSessionBtn.addEventListener('click', () => {
+            joinSessionBtn.addEventListener('click', async () => {
                 const name = document.getElementById('player-name-input').value.trim();
-                const sessionId = document.getElementById('session-id-input').value.trim();
-                if (!name || !sessionId) {
-                    showAlert("Please enter your name and a session ID.");
+                const shortCode = document.getElementById('session-id-input').value.trim().toUpperCase();
+                if (!name || !shortCode) {
+                    showAlert("Please enter your name and a session code.");
                     return;
                 }
-                joinSession(sessionId, name);
+                
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const sessionsRef = collection(db, `artifacts/${appId}/public/data/spinner_sessions`);
+                const q = query(sessionsRef, where("shortCode", "==", shortCode));
+                
+                const querySnapshot = await getDocs(q);
+                if (querySnapshot.empty) {
+                    showAlert("Session not found!");
+                    return;
+                }
+
+                const sessionDoc = querySnapshot.docs[0];
+                joinSession(sessionDoc.id, name);
             });
 
             async function joinSession(sessionId, name) {
@@ -216,13 +272,16 @@
                         showAlert("Session not found!");
                         return;
                     }
+
+                    const sessionData = sessionDoc.data();
+                    currentShortCode = sessionData.shortCode;
                     
                     if (name) { // Add player if they are joining, not creating
                         if (!auth.currentUser) {
                             showAlert("Authentication error. Please refresh.");
                             return;
                         }
-                        const currentPlayers = sessionDoc.data().players || [];
+                        const currentPlayers = sessionData.players || [];
                         if (!currentPlayers.some(p => p.userId === auth.currentUser.uid)) {
                              await updateDoc(sessionRef, {
                                 players: arrayUnion({ userId: auth.currentUser.uid, name })
@@ -232,13 +291,21 @@
                     
                     currentSessionId = sessionId;
                     showPage('sessionLobby');
-                    sessionIdDisplay.textContent = sessionId;
+                    sessionIdDisplay.textContent = currentShortCode;
 
                     // Listen for real-time updates
                     sessionUnsubscribe = onSnapshot(sessionRef, (doc) => {
-                        const sessionData = doc.data();
-                        if (!sessionData) return;
+                        if (!doc.exists()) {
+                            showAlert("The host has ended the session.");
+                            if (document.fullscreenElement) {
+                                document.exitFullscreen();
+                            }
+                            showPage('home');
+                            sessionUnsubscribe();
+                            return;
+                        }
 
+                        const sessionData = doc.data();
                         playerNames = sessionData.players;
                         updateLobbyUI(sessionData);
                         handleGameState(sessionData);
@@ -808,6 +875,36 @@
             to { transform: translate(-50%, -50%) scale(3); opacity: 0; }
         }
 
+        #session-lobby-page.game-fullscreen .session-info-panel {
+            display: none;
+        }
+        #target-practice-area:fullscreen {
+            background-color: #0c0a09;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            height: 100%;
+        }
+        #target-practice-area:fullscreen h1 {
+            font-size: 4rem;
+            color: white;
+        }
+        #target-practice-area:fullscreen h2 {
+            font-size: 2rem;
+            color: #d1d5db;
+        }
+        #target-practice-area:fullscreen #target-container {
+            height: 70vh;
+            border: 2px solid #374151;
+        }
+        #target-practice-area:fullscreen #fire-btn {
+            padding: 1.5rem 3rem;
+            font-size: 2rem;
+        }
+
 
     </style>
 </head>
@@ -887,8 +984,8 @@
                 </div>
                 <div class="border p-4 rounded-lg">
                     <h2 class="text-2xl font-bold mb-2">Join a Session</h2>
-                    <label for="session-id-input" class="block text-sm font-medium text-gray-700 mb-1">Session ID</label>
-                    <input type="text" id="session-id-input" placeholder="Enter session ID..." class="w-full p-3 border rounded-md mb-2 focus:ring-2 focus:ring-green-500">
+                    <label for="session-id-input" class="block text-sm font-medium text-gray-700 mb-1">Session Code</label>
+                    <input type="text" id="session-id-input" placeholder="Enter session code..." class="w-full p-3 border rounded-md mb-2 focus:ring-2 focus:ring-green-500">
                     <button id="join-session-btn" class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-lg">Join</button>
                     <button id="scan-qr-btn" class="w-full mt-2 bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-lg">Scan QR</button>
                 </div>
@@ -903,7 +1000,7 @@
                 <span id="countdown-text" class="text-9xl font-bold text-white"></span>
             </div>
             <!-- Left Panel: Target Practice -->
-            <div class="flex-grow flex flex-col items-center justify-center">
+            <div id="target-practice-area" class="flex-grow flex flex-col items-center justify-center">
                 <h1 class="text-5xl font-bold text-gray-800 mb-2">Target Practice</h1>
                 <h2 id="spinner-subtitle" class="text-2xl text-center text-gray-500 mb-10">Waiting for host...</h2>
                 <div id="target-container" class="relative">
@@ -913,16 +1010,21 @@
                 <button id="fire-btn" class="hidden mt-8 bg-red-500 hover:bg-red-600 text-white font-bold py-4 px-8 rounded-lg text-xl">START</button>
             </div>
             <!-- Right Panel: Session Info -->
-            <div class="w-full md:w-1/3 bg-gray-50 p-6 rounded-lg">
-                <h2 class="text-3xl font-bold mb-4">Session Info</h2>
-                <div class="mb-4">
-                    <label class="block text-sm font-medium text-gray-500">Session ID</label>
-                    <p id="session-id-display" class="text-2xl font-mono bg-gray-200 p-2 rounded break-words"></p>
-                    <button id="show-qr-btn" class="hidden w-full mt-2 bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg">Show QR Code</button>
+            <div class="w-full md:w-1/3 bg-gray-50 p-6 rounded-lg flex flex-col session-info-panel">
+                <div>
+                    <h2 class="text-3xl font-bold mb-4">Session Info</h2>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-500">Session Code</label>
+                        <p id="session-id-display" class="text-2xl font-mono bg-gray-200 p-2 rounded break-words"></p>
+                        <button id="show-qr-btn" class="hidden w-full mt-2 bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg">Show QR Code</button>
+                    </div>
+                    <h3 class="text-2xl font-bold mb-2">Players</h3>
+                    <ul id="player-list" class="space-y-2 flex-grow"></ul>
                 </div>
-                <h3 class="text-2xl font-bold mb-2">Players</h3>
-                <ul id="player-list" class="space-y-2"></ul>
-                <button id="leave-session-btn" class="w-full mt-8 bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-lg">Leave Session</button>
+                <div class="mt-auto pt-4 space-y-2">
+                    <button id="fullscreen-btn" class="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-lg">Fullscreen</button>
+                    <button id="leave-session-btn" class="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-lg">Leave Session</button>
+                </div>
             </div>
         </div>
     </div>
