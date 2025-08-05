@@ -81,12 +81,12 @@
             async function initializeFirebase() {
                 try {
                     const firebaseConfig = {
-                        apiKey: "AIzaSyCZNebG3fhWoK7ZtUyi2n1Qfv57SZ9clV8",
-                        authDomain: "vehicle-inventory-db.firebaseapp.com",
-                        projectId: "vehicle-inventory-db",
-                        storageBucket: "vehicle-inventory-db.appspot.com",
-                        messagingSenderId: "347915856121",
-                        appId: "1:347915856121:web:f2acf41f13a7862f2d9a28"
+                        apiKey: "AIzaSyDdPi75Cfl92SxsdHP1ZdoFEDgDDJWygng",
+                        authDomain: "name-spinner-app.firebaseapp.com",
+                        projectId: "name-spinner-app",
+                        storageBucket: "name-spinner-app.appspot.com",
+                        messagingSenderId: "663136681592",
+                        appId: "1:663136681592:web:06618739cbaaa2dfb9b78d"
                     };
 
                     const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
@@ -151,19 +151,30 @@
                     showAlert("Please enter your name.");
                     return;
                 }
-                
-                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-                const sessionRef = collection(db, `artifacts/${appId}/public/data/spinner_sessions`);
-                const newSessionDoc = await addDoc(sessionRef, {
-                    hostId: currentUserId,
-                    players: [{ userId: currentUserId, name }],
-                    selectedPlayer: null,
-                    lastSpin: null,
-                    rotation: 0,
-                });
 
-                currentSessionId = newSessionDoc.id;
-                joinSession(currentSessionId);
+                if (!db || !auth.currentUser) {
+                    showAlert("Not connected to services. Please refresh and try again.");
+                    console.error("Firestore DB or Auth User is not available.");
+                    return;
+                }
+                
+                try {
+                    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                    const sessionRef = collection(db, `artifacts/${appId}/public/data/spinner_sessions`);
+                    const newSessionDoc = await addDoc(sessionRef, {
+                        hostId: auth.currentUser.uid,
+                        players: [{ userId: auth.currentUser.uid, name }],
+                        selectedPlayer: null,
+                        lastSpin: null,
+                        rotation: 0,
+                    });
+
+                    currentSessionId = newSessionDoc.id;
+                    joinSession(currentSessionId);
+                } catch (error) {
+                    console.error("Error creating session:", error);
+                    showAlert("Failed to create session. This might be a permissions issue. Please check your Firestore security rules.");
+                }
             });
 
             joinSessionBtn.addEventListener('click', () => {
@@ -189,8 +200,12 @@
                     }
                     
                     if (name) { // Add player if they are joining, not creating
+                        if (!auth.currentUser) {
+                            showAlert("Authentication error. Please refresh.");
+                            return;
+                        }
                         await updateDoc(sessionRef, {
-                            players: arrayUnion({ userId: currentUserId, name })
+                            players: arrayUnion({ userId: auth.currentUser.uid, name })
                         });
                     }
                     
@@ -491,7 +506,7 @@
                 quizData.forEach(q => {
                     const chest = document.createElement('div');
                     chest.className = 'treasure-chest text-5xl cursor-pointer transition-transform transform hover:scale-125';
-                    chest.textContent = '�';
+                    chest.textContent = '📦';
                     chest.dataset.id = q.id;
                     chest.addEventListener('click', () => {
                         displayQuestion(q.id);
@@ -811,4 +826,3 @@
 
 </body>
 </html>
-�
