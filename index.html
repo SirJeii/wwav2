@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quiz & Spin Wheel Creator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script type="module">
+        // Firebase SDK imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot, updateDoc, arrayUnion, collection, addDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            // Firebase configuration and initialization
+            let app, db, auth;
+            let currentUserId, currentSessionId, sessionUnsubscribe;
+
+            // --- App State ---
+            let quizData = [];
+            let playerNames = []; // Used for the spinner wheel
+            let currentAnswer = '';
+            let availableQuestionIds = [];
+            let currentLadderIndex = 0;
+            let currentRotation = 0;
+            const wheelColors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1', '#f97316'];
+
+            // --- Page Elements ---
+            const allPages = {
+                home: document.getElementById('home-page'),
+                creation: document.getElementById('creation-page'),
+                selection: document.getElementById('selection-page'),
+                sessionSetup: document.getElementById('session-setup-page'),
+                sessionLobby: document.getElementById('session-lobby-page'),
+                game: document.getElementById('game-page'),
+            };
+            
+            // --- Other UI Elements ---
+            const goToQuizBtn = document.getElementById('go-to-quiz-btn');
+            const goToSpinnerBtn = document.getElementById('go-to-spinner-btn');
+            const createSessionBtn = document.getElementById('create-session-btn');
+            const joinSessionBtn = document.getElementById('join-session-btn');
+            const spinBtn = document.getElementById('spin-btn');
+            const sessionIdDisplay = document.getElementById('session-id-display');
+            const playerList = document.getElementById('player-list');
+            const spinnerContainer = document.getElementById('spinner-container');
+            const spinnerCanvas = document.getElementById('spinner-canvas');
+            const spinnerSubtitle = document.getElementById('spinner-subtitle');
+            const notificationModal = document.getElementById('notification-modal');
+            const notificationText = document.getElementById('notification-text');
+            const notificationCloseBtn = document.getElementById('notification-close-btn');
+            const alertModal = document.getElementById('alert-modal');
+            const alertText = document.getElementById('alert-text');
+            const alertCloseBtn = document.getElementById('alert-close-btn');
+            const questionsContainer = document.getElementById('questions-container');
+            const addQuestionBtn = document.getElementById('add-question-btn');
+            const deleteAllBtn = document.getElementById('delete-all-btn');
+            const saveQuizBtn = document.getElementById('save-quiz-btn');
+            const errorMessage = document.getElementById('error-message');
+            const emptyStateMessage = document.getElementById('empty-state-message');
+            const excelUploadInput = document.getElementById('excel-upload-input');
+            const gameBoard = document.getElementById('game-board');
+            const gameTitle = document.getElementById('game-title');
+            const gameSubtitle = document.getElementById('game-subtitle');
+            const randomPickBtn = document.getElementById('random-pick-btn');
+            const nextQuestionBtn = document.getElementById('next-question-btn');
+            const backToSelectionBtn = document.getElementById('back-to-selection-btn');
+            const editQuizBtn = document.getElementById('edit-quiz-btn');
+            const modalOverlay = document.getElementById('modal-overlay');
+            const modalQuestionNumber = document.getElementById('modal-question-number');
+            const modalQuestionText = document.getElementById('modal-question-text');
+            const modalAnswerBox = document.getElementById('modal-answer-box');
+            const modalShowAnswerBtn = document.getElementById('modal-show-answer-btn');
+            const modalCloseBtn = document.getElementById('modal-close-btn');
+
+            let questionCount = 0;
+
+            // --- App Initialization ---
+            async function initializeFirebase() {
+                try {
+                    if (typeof __firebase_config === 'undefined' || !__firebase_config) {
+                        console.error("Firebase configuration is missing.");
+                        document.body.innerHTML = `<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative text-center m-8" role="alert">
+                            <strong class="font-bold">Configuration Error!</strong>
+                            <span class="block sm:inline">Application configuration is missing. Cannot connect to services.</span>
+                        </div>`;
+                        return;
+                    }
+
+                    const firebaseConfig = JSON.parse(__firebase_config);
+                    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                    app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+
+                    onAuthStateChanged(auth, user => {
+                        if (user) {
+                            currentUserId = user.uid;
+                        }
+                    });
+
+                     if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (e) {
+                    console.error("Firebase initialization failed:", e);
+                    document.body.innerHTML = `<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative text-center m-8" role="alert">
+                        <strong class="font-bold">Connection Error!</strong>
+                        <span class="block sm:inline">Could not connect to services. Please try again later.</span>
+                    </div>`;
+                }
+            }
+            
+            // --- Navigation ---
+            const showPage = (pageKey) => {
+                Object.values(allPages).forEach(page => page.classList.add('hidden'));
+                if (allPages[pageKey]) {
+                    allPages[pageKey].classList.remove('hidden');
+                }
+            };
+
+            // --- UI Helpers ---
+            const showAlert = (message) => {
+                alertText.textContent = message;
+                alertModal.classList.remove('hidden');
+            };
+
+            alertCloseBtn.addEventListener('click', () => {
+                alertModal.classList.add('hidden');
+            });
+
+            // --- Event Listeners for Navigation ---
+            goToQuizBtn.addEventListener('click', () => showPage('creation'));
+            goToSpinnerBtn.addEventListener('click', () => showPage('sessionSetup'));
+            document.getElementById('back-to-home-from-quiz-btn').addEventListener('click', () => showPage('home'));
+            document.getElementById('back-to-home-from-session-setup-btn').addEventListener('click', () => showPage('home'));
+            document.getElementById('back-to-quiz-creation-btn').addEventListener('click', () => showPage('creation'));
+            document.getElementById('leave-session-btn').addEventListener('click', () => {
+                if(sessionUnsubscribe) sessionUnsubscribe();
+                showPage('home');
+            });
+            notificationCloseBtn.addEventListener('click', () => notificationModal.classList.add('hidden'));
+
+            // --- Session Management ---
+            createSessionBtn.addEventListener('click', async () => {
+                const name = document.getElementById('player-name-input').value.trim();
+                if (!name) {
+                    showAlert("Please enter your name.");
+                    return;
+                }
+                
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const sessionRef = collection(db, `artifacts/${appId}/public/data/spinner_sessions`);
+                const newSessionDoc = await addDoc(sessionRef, {
+                    hostId: currentUserId,
+                    players: [{ userId: currentUserId, name }],
+                    selectedPlayer: null,
+                    lastSpin: null,
+                    rotation: 0,
+                });
+
+                currentSessionId = newSessionDoc.id;
+                joinSession(currentSessionId);
+            });
+
+            joinSessionBtn.addEventListener('click', () => {
+                const name = document.getElementById('player-name-input').value.trim();
+                const sessionId = document.getElementById('session-id-input').value.trim();
+                if (!name || !sessionId) {
+                    showAlert("Please enter your name and a session ID.");
+                    return;
+                }
+                joinSession(sessionId, name);
+            });
+
+            async function joinSession(sessionId, name) {
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const sessionRef = doc(db, `artifacts/${appId}/public/data/spinner_sessions`, sessionId);
+                
+                try {
+                    const sessionDoc = await getDoc(sessionRef);
+
+                    if (!sessionDoc.exists()) {
+                        showAlert("Session not found!");
+                        return;
+                    }
+                    
+                    if (name) { // Add player if they are joining, not creating
+                        await updateDoc(sessionRef, {
+                            players: arrayUnion({ userId: currentUserId, name })
+                        });
+                    }
+                    
+                    currentSessionId = sessionId;
+                    showPage('sessionLobby');
+                    sessionIdDisplay.textContent = sessionId;
+
+                    // Listen for real-time updates
+                    sessionUnsubscribe = onSnapshot(sessionRef, (doc) => {
+                        const sessionData = doc.data();
+                        if (!sessionData) return;
+
+                        playerNames = sessionData.players;
+                        updateLobbyUI(sessionData);
+                        drawWheel();
+
+                        // Sync wheel rotation
+                        if (spinnerCanvas.style.transform !== `rotate(${sessionData.rotation}deg)`) {
+                             spinnerCanvas.style.transform = `rotate(${sessionData.rotation}deg)`;
+                        }
+
+                        if (sessionData.selectedPlayer && sessionData.lastSpin) {
+                            showNotification(sessionData.selectedPlayer);
+                        }
+                    });
+                } catch (error) {
+                    console.error("Error joining session: ", error);
+                    showAlert("Could not join the session. Please check the ID and try again.");
+                }
+            }
+
+            function updateLobbyUI(sessionData) {
+                playerList.innerHTML = '';
+                sessionData.players.forEach(p => {
+                    const li = document.createElement('li');
+                    li.className = 'bg-gray-200 p-2 rounded';
+                    li.textContent = p.name;
+                    if (p.userId === sessionData.hostId) {
+                        li.textContent += ' (Host)';
+                        li.classList.add('font-bold');
+                    }
+                    playerList.appendChild(li);
+                });
+
+                if (currentUserId === sessionData.hostId) {
+                    spinnerContainer.classList.remove('hidden');
+                    spinBtn.classList.remove('hidden');
+                    spinnerSubtitle.textContent = "Click the button to spin the wheel!";
+                } else {
+                    spinnerContainer.classList.remove('hidden'); // All users should see the wheel
+                    spinBtn.classList.add('hidden');
+                    spinnerSubtitle.textContent = "Waiting for the host to spin...";
+                }
+            }
+
+            function showNotification(selectedPlayer) {
+                if (selectedPlayer.userId === currentUserId) {
+                    notificationText.textContent = "You have been selected!";
+                } else {
+                    notificationText.textContent = `${selectedPlayer.name} was selected!`;
+                }
+                notificationModal.classList.remove('hidden');
+                launchConfetti();
+            }
+
+            // --- Spinner Logic ---
+            function drawWheel() {
+                if (!spinnerCanvas) return;
+                const ctx = spinnerCanvas.getContext('2d');
+                const numSegments = playerNames.length;
+                if (numSegments === 0) {
+                    ctx.clearRect(0,0, spinnerCanvas.width, spinnerCanvas.height);
+                    return;
+                };
+                
+                const anglePerSegment = (2 * Math.PI) / numSegments;
+                const radius = spinnerCanvas.width / 2;
+
+                ctx.clearRect(0, 0, spinnerCanvas.width, spinnerCanvas.height);
+                ctx.font = 'bold 20px Inter, sans-serif';
+                ctx.save();
+                ctx.translate(radius, radius);
+                
+                playerNames.forEach((player, i) => {
+                    const startAngle = i * anglePerSegment;
+                    const endAngle = startAngle + anglePerSegment;
+
+                    ctx.beginPath();
+                    ctx.moveTo(0, 0);
+                    ctx.arc(0, 0, radius - 10, startAngle, endAngle);
+                    ctx.closePath();
+                    
+                    ctx.fillStyle = wheelColors[i % wheelColors.length];
+                    ctx.fill();
+                    ctx.stroke();
+
+                    ctx.save();
+                    ctx.fillStyle = 'white';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.rotate(startAngle + anglePerSegment / 2);
+                    const text = player.name.length > 12 ? player.name.substring(0, 10) + '...' : player.name;
+                    ctx.fillText(text, radius * 0.6, 0);
+                    ctx.restore();
+                });
+                ctx.restore();
+            }
+
+            spinBtn.addEventListener('click', async () => {
+                if (playerNames.length < 2) {
+                    showAlert("You need at least 2 players to spin the wheel.");
+                    return;
+                }
+
+                spinBtn.disabled = true;
+                spinnerSubtitle.textContent = "Spinning...";
+
+                const spinAngle = Math.random() * 360 + 360 * 5;
+                currentRotation += spinAngle;
+                
+                const numSegments = playerNames.length;
+                const finalAngle = currentRotation % 360;
+                const anglePerSegment = 360 / numSegments;
+                // The pointer is at the top (0 degrees), so we adjust the calculation
+                const winningSegmentIndex = Math.floor((360 - finalAngle + (anglePerSegment / 2) + 270) % 360 / anglePerSegment);
+                const winner = playerNames[winningSegmentIndex];
+
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                const sessionRef = doc(db, `artifacts/${appId}/public/data/spinner_sessions`, currentSessionId);
+                
+                await updateDoc(sessionRef, {
+                    selectedPlayer: winner,
+                    lastSpin: new Date().toISOString(), // To trigger snapshot
+                    rotation: currentRotation
+                });
+                
+                setTimeout(() => {
+                    spinnerSubtitle.textContent = `The winner is... ${winner.name}!`;
+                    spinBtn.disabled = false;
+                }, 5000);
+            });
+
+            // --- Quiz Creation Logic (Existing) ---
+            const addQuestionField = (question = '', answer = '') => {
+                if (questionCount >= 60) {
+                    errorMessage.textContent = "You can add a maximum of 60 questions.";
+                    addQuestionBtn.disabled = true;
+                    return;
+                }
+                emptyStateMessage?.classList.add('hidden');
+                questionCount++;
+                const questionId = `q-${Date.now()}-${questionCount}`;
+                const fieldHTML = `
+                    <div id="${questionId}" class="p-4 border rounded-lg bg-gray-50 flex items-center gap-4">
+                        <span class="text-xl font-bold text-gray-500">${questionCount}.</span>
+                        <div class="flex-grow grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <input type="text" placeholder="Question" class="question-input w-full p-3 border rounded-md focus:ring-2 focus:ring-blue-500" value="${question}">
+                            <input type="text" placeholder="Answer" class="answer-input w-full p-3 border rounded-md focus:ring-2 focus:ring-blue-500" value="${answer}">
+                        </div>
+                        <button class="remove-btn text-red-500 hover:text-red-700 font-bold text-2xl">&times;</button>
+                    </div>
+                `;
+                questionsContainer.insertAdjacentHTML('beforeend', fieldHTML);
+                
+                const newField = document.getElementById(questionId);
+                newField.querySelector('.remove-btn').addEventListener('click', () => {
+                    newField.remove();
+                    updateQuestionNumbers();
+                    errorMessage.textContent = "";
+                    if (questionCount === 0) emptyStateMessage?.classList.remove('hidden');
+                });
+            };
+            
+            const updateQuestionNumbers = () => {
+                const allFields = questionsContainer.querySelectorAll('.p-4');
+                allFields.forEach((field, index) => {
+                    field.querySelector('span').textContent = `${index + 1}.`;
+                });
+                questionCount = allFields.length;
+                addQuestionBtn.disabled = questionCount >= 60;
+            };
+
+            const handleExcelUpload = (event) => {
+                const file = event.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const data = new Uint8Array(e.target.result);
+                        const workbook = XLSX.read(data, { type: 'array' });
+                        const firstSheetName = workbook.SheetNames[0];
+                        const worksheet = workbook.Sheets[firstSheetName];
+                        const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                        deleteAllQuestions();
+                        const validData = jsonData.filter(row => Array.isArray(row) && row.length >= 2 && String(row[0]).trim() && String(row[1]).trim());
+                        if (validData.length > 60) {
+                            errorMessage.textContent = "Only the first 60 questions were imported.";
+                            validData.splice(60);
+                        }
+                        if (validData.length === 0) {
+                            errorMessage.textContent = "No valid questions found in file.";
+                            return;
+                        }
+                        validData.forEach(row => addQuestionField(String(row[0]).trim(), String(row[1]).trim()));
+                        updateQuestionNumbers();
+                    } catch (error) {
+                        errorMessage.textContent = "Error processing Excel file.";
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+                event.target.value = '';
+            };
+
+            const deleteAllQuestions = () => {
+                questionsContainer.innerHTML = '';
+                if(emptyStateMessage) {
+                    questionsContainer.appendChild(emptyStateMessage);
+                    emptyStateMessage.classList.remove('hidden');
+                }
+                questionCount = 0;
+                updateQuestionNumbers();
+            };
+
+            addQuestionBtn.addEventListener('click', () => addQuestionField());
+            deleteAllBtn.addEventListener('click', deleteAllQuestions);
+            excelUploadInput.addEventListener('change', handleExcelUpload);
+
+            saveQuizBtn.addEventListener('click', () => {
+                let validQuestions = [];
+                questionsContainer.querySelectorAll('.p-4').forEach((field) => {
+                    const question = field.querySelector('.question-input').value.trim();
+                    const answer = field.querySelector('.answer-input').value.trim();
+                    if (question && answer) validQuestions.push({ question, answer });
+                });
+
+                if (validQuestions.length < 3) {
+                    errorMessage.textContent = "Please enter at least 3 valid questions.";
+                    return;
+                }
+                
+                quizData = validQuestions.map((item, index) => ({ ...item, id: index + 1 }));
+                localStorage.setItem('customQuizData', JSON.stringify(quizData));
+                showPage('selection');
+            });
+
+            // --- Game Mode Logic (Existing) ---
+            document.querySelectorAll('.game-mode-btn').forEach(button => {
+                button.addEventListener('click', (e) => {
+                    const mode = e.target.dataset.mode;
+                    showPage('game');
+                    initializeGame(mode);
+                });
+            });
+            
+            const initializeGame = (mode) => {
+                const storedData = localStorage.getItem('customQuizData');
+                if (storedData) quizData = JSON.parse(storedData);
+                if (quizData.length === 0) {
+                    showPage('creation');
+                    return;
+                }
+
+                availableQuestionIds = quizData.map(q => q.id);
+                document.getElementById('confetti-container').innerHTML = '';
+                gameBoard.innerHTML = '';
+
+                randomPickBtn.classList.add('hidden');
+                nextQuestionBtn.classList.add('hidden');
+
+                if (mode === 'grid') initializeGrid();
+                else if (mode === 'treasure') initializeTreasureHunt();
+                else if (mode === 'ladder') initializeLadder();
+            };
+            
+            const initializeGrid = () => {
+                gameTitle.textContent = "Classic Grid";
+                gameSubtitle.textContent = "Select a number or let us pick one for you!";
+                randomPickBtn.classList.remove('hidden');
+                const grid = document.createElement('div');
+                grid.className = 'grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 gap-4';
+                quizData.forEach(q => {
+                    const box = document.createElement('div');
+                    box.className = 'number-box bg-blue-500 text-white rounded-lg p-5 text-4xl font-bold cursor-pointer transition-all duration-300 shadow-md hover:shadow-xl hover:scale-105 flex items-center justify-center';
+                    box.textContent = q.id;
+                    box.dataset.id = q.id;
+                    box.addEventListener('click', () => displayQuestion(q.id));
+                    grid.appendChild(box);
+                });
+                gameBoard.appendChild(grid);
+            };
+
+            const initializeTreasureHunt = () => {
+                gameTitle.textContent = "Treasure Hunt";
+                gameSubtitle.textContent = "Click on a treasure chest to reveal a question!";
+                const map = document.createElement('div');
+                map.id = 'treasure-map';
+                map.className = 'relative w-full h-[60vh] rounded-lg p-8 flex flex-wrap justify-around items-center';
+                quizData.forEach(q => {
+                    const chest = document.createElement('div');
+                    chest.className = 'treasure-chest text-5xl cursor-pointer transition-transform transform hover:scale-125';
+                    chest.textContent = '📦';
+                    chest.dataset.id = q.id;
+                    chest.addEventListener('click', () => {
+                        displayQuestion(q.id);
+                        chest.textContent = '🎁';
+                        chest.classList.add('opened');
+                    });
+                    map.appendChild(chest);
+                });
+                gameBoard.appendChild(map);
+            };
+
+            const initializeLadder = () => {
+                gameTitle.textContent = "Quiz Ladder";
+                gameSubtitle.textContent = "Answer the questions to climb to the top!";
+                nextQuestionBtn.classList.remove('hidden');
+                currentLadderIndex = 0;
+                const ladder = document.createElement('div');
+                ladder.className = 'flex flex-col-reverse items-center gap-2 w-full max-w-md mx-auto';
+                 quizData.forEach((q, index) => {
+                    const rung = document.createElement('div');
+                    rung.className = 'ladder-rung w-full bg-yellow-800 text-white p-4 rounded-md text-center font-bold shadow-lg';
+                    rung.textContent = `Question ${q.id}`;
+                    rung.dataset.id = q.id;
+                    ladder.appendChild(rung);
+                });
+                gameBoard.appendChild(ladder);
+                displayQuestion(quizData[currentLadderIndex].id, true);
+                updateLadderVisual();
+            };
+            
+            const updateLadderVisual = () => {
+                const rungs = gameBoard.querySelectorAll('.ladder-rung');
+                rungs.forEach((rung, index) => {
+                    const reversedIndex = rungs.length - 1 - index;
+                    rung.classList.toggle('active', reversedIndex === currentLadderIndex);
+                });
+            };
+
+            nextQuestionBtn.addEventListener('click', () => {
+                if (currentLadderIndex >= quizData.length - 1) {
+                    launchConfetti();
+                    gameSubtitle.textContent = "Congratulations! You've reached the top!";
+                    nextQuestionBtn.disabled = true;
+                    const rungs = gameBoard.querySelectorAll('.ladder-rung');
+                    rungs.forEach(r => r.classList.remove('active'));
+                    rungs[0].classList.add('active');
+                    return;
+                }
+                currentLadderIndex++;
+                displayQuestion(quizData[currentLadderIndex].id, true);
+                updateLadderVisual();
+            });
+
+            const displayQuestion = (id, isLadder = false) => {
+                const questionData = quizData.find(q => q.id === parseInt(id));
+                if (!questionData) return;
+
+                const element = gameBoard.querySelector(`[data-id='${id}']`);
+                if (element && element.classList.contains('visited')) return;
+                
+                modalQuestionNumber.textContent = `Question #${questionData.id}`;
+                modalQuestionText.textContent = questionData.question;
+                currentAnswer = questionData.answer;
+
+                modalAnswerBox.classList.add('hidden');
+                modalShowAnswerBtn.classList.remove('hidden');
+                modalOverlay.classList.remove('hidden');
+                setTimeout(() => {
+                    modalOverlay.classList.remove('opacity-0');
+                    modal.classList.remove('scale-95');
+                }, 10);
+
+                if (!isLadder) {
+                    element?.classList.add('visited');
+                    const index = availableQuestionIds.indexOf(id);
+                    if (index > -1) availableQuestionIds.splice(index, 1);
+                    if (availableQuestionIds.length === 0) {
+                        launchConfetti();
+                        gameSubtitle.textContent = "Quiz Complete!";
+                    }
+                }
+            };
+
+            const closeModal = () => {
+                modalOverlay.classList.add('opacity-0');
+                modal.classList.add('scale-95');
+                setTimeout(() => modalOverlay.classList.add('hidden'), 300);
+            };
+            
+            const launchConfetti = () => {
+                const confettiContainer = document.getElementById('confetti-container');
+                if (!confettiContainer) return;
+                confettiContainer.innerHTML = '';
+                const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
+                for (let i = 0; i < 150; i++) {
+                    const confetti = document.createElement('div');
+                    confetti.className = 'confetti';
+                    confetti.style.left = Math.random() * 100 + 'vw';
+                    confetti.style.animationDuration = Math.random() * 3 + 2 + 's';
+                    confetti.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
+                    confettiContainer.appendChild(confetti);
+                }
+            };
+
+            modalShowAnswerBtn.addEventListener('click', () => {
+                modalAnswerBox.textContent = currentAnswer;
+                modalAnswerBox.classList.remove('hidden');
+                modalShowAnswerBtn.classList.add('hidden');
+            });
+
+            modalCloseBtn.addEventListener('click', closeModal);
+            modalOverlay.addEventListener('click', (e) => {
+                if (e.target === modalOverlay) closeModal();
+            });
+
+            backToSelectionBtn.addEventListener('click', () => showPage('selection'));
+            editQuizBtn.addEventListener('click', () => showPage('creation'));
+            
+            // --- Final Initialization ---
+            initializeFirebase().then(() => {
+                showPage('home');
+            });
+        });
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .number-box.visited, .treasure-chest.opened {
+            background-color: #6b7280 !important;
+            cursor: default;
+            transform: scale(0.95);
+            opacity: 0.6;
+        }
+        .number-box.visited:hover {
+            transform: scale(0.95);
+            box-shadow: none;
+        }
+        #confetti-container {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; overflow: hidden; z-index: 9999;
+        }
+        .confetti {
+            position: absolute; width: 10px; height: 10px; opacity: 0.7;
+            animation: fall 5s linear forwards;
+        }
+        @keyframes fall {
+            to { transform: translateY(100vh) rotate(360deg); opacity: 0; }
+        }
+        #treasure-map {
+            background-image: url('https://placehold.co/1200x800/fdf6e3/a89c82?text=Treasure+Map');
+            background-size: cover; background-position: center;
+        }
+        .ladder-rung { transition: all 0.5s ease-in-out; }
+        .ladder-rung.active {
+            background-color: #f59e0b !important; color: white; transform: scale(1.1);
+        }
+        #spinner-canvas {
+            transition: transform 5s cubic-bezier(0.25, 0.1, 0.25, 1);
+        }
+        #spinner-container::before {
+            content: '▼'; position: absolute; top: -10px; left: 50%;
+            transform: translateX(-50%); font-size: 50px; color: #ef4444; z-index: 10;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+
+    <!-- Page 0: Home Page -->
+    <div id="home-page" class="min-h-screen flex items-center justify-center p-4">
+        <div class="w-full max-w-4xl bg-white p-8 rounded-2xl shadow-lg text-center">
+            <h1 class="text-4xl font-bold text-gray-800 mb-4">Welcome!</h1>
+            <p class="text-center text-gray-500 mb-8">What would you like to do today?</p>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mt-8">
+                <button id="go-to-quiz-btn" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-12 px-6 rounded-lg transition-transform transform hover:scale-105 text-2xl">Create a Quiz Game</button>
+                <button id="go-to-spinner-btn" class="bg-purple-500 hover:bg-purple-600 text-white font-bold py-12 px-6 rounded-lg transition-transform transform hover:scale-105 text-2xl">Use the Name Spinner</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Page 1: Quiz Creation -->
+    <div id="creation-page" class="hidden min-h-screen flex items-center justify-center p-4">
+        <div class="w-full max-w-4xl bg-white p-8 rounded-2xl shadow-lg">
+            <div class="flex justify-between items-start mb-4">
+                <h1 class="text-4xl font-bold text-gray-800">Create Your Quiz</h1>
+                <button id="back-to-home-from-quiz-btn" class="bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg">Back to Home</button>
+            </div>
+            <p class="text-center text-gray-500 mb-6">Enter questions manually or upload an Excel file.</p>
+            <div class="flex justify-center mb-6">
+                <div class="border p-4 rounded-lg w-full max-w-sm">
+                    <h3 class="font-semibold text-lg mb-2 text-center">Upload from File</h3>
+                    <label for="excel-upload-input" class="cursor-pointer w-full text-center block bg-indigo-500 hover:bg-indigo-600 text-white font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105">
+                        Upload Excel File
+                    </label>
+                    <input type="file" id="excel-upload-input" class="hidden" accept=".xlsx, .xls, .csv">
+                    <p class="text-center text-gray-400 mt-2 text-sm">Questions in column 1, answers in column 2.</p>
+                </div>
+            </div>
+            <div id="questions-container" class="space-y-4 max-h-[40vh] overflow-y-auto pr-4">
+                <p id="empty-state-message" class="text-center text-gray-400 my-8">Click "Add Question" or "Upload Excel File" to get started!</p>
+            </div>
+            <div class="flex justify-center items-center mt-8 gap-4">
+                <button id="add-question-btn" class="bg-gray-500 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105">Add Question</button>
+                <button id="delete-all-btn" class="bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105">Delete All</button>
+                <button id="save-quiz-btn" class="bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105">Save & Continue</button>
+            </div>
+            <p id="error-message" class="text-red-500 text-center mt-4"></p>
+        </div>
+    </div>
+    
+    <!-- Page 2: Game Mode Selection -->
+    <div id="selection-page" class="hidden min-h-screen flex items-center justify-center p-4">
+        <div class="w-full max-w-4xl bg-white p-8 rounded-2xl shadow-lg text-center">
+            <h1 class="text-4xl font-bold text-gray-800 mb-4">Choose Your Game Mode</h1>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mt-8">
+                <button data-mode="grid" class="game-mode-btn bg-blue-500 hover:bg-blue-600 text-white font-bold py-8 px-6 rounded-lg">Classic Grid</button>
+                <button data-mode="treasure" class="game-mode-btn bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-8 px-6 rounded-lg">Treasure Hunt</button>
+                <button data-mode="ladder" class="game-mode-btn bg-green-500 hover:bg-green-600 text-white font-bold py-8 px-6 rounded-lg">Quiz Ladder</button>
+            </div>
+             <button id="back-to-quiz-creation-btn" class="mt-8 bg-gray-500 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg">Back to Edit Quiz</button>
+        </div>
+    </div>
+
+    <!-- Page 2.5: Session Setup -->
+    <div id="session-setup-page" class="hidden min-h-screen flex items-center justify-center p-4">
+        <div class="w-full max-w-2xl bg-white p-8 rounded-2xl shadow-lg">
+            <div class="flex justify-between items-start mb-6">
+                <h1 class="text-4xl font-bold text-gray-800">Multiplayer Spinner</h1>
+                <button id="back-to-home-from-session-setup-btn" class="bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg">Back to Home</button>
+            </div>
+            <div class="space-y-4 mb-6">
+                <label for="player-name-input" class="block text-lg font-medium text-gray-700">Your Name</label>
+                <input type="text" id="player-name-input" placeholder="Enter your name..." class="w-full p-3 border rounded-md focus:ring-2 focus:ring-purple-500">
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="border p-4 rounded-lg">
+                    <h2 class="text-2xl font-bold mb-2">Create a Session</h2>
+                    <p class="text-gray-600 mb-4">Start a new session as the host.</p>
+                    <button id="create-session-btn" class="w-full bg-purple-500 hover:bg-purple-600 text-white font-bold py-3 px-6 rounded-lg">Create</button>
+                </div>
+                <div class="border p-4 rounded-lg">
+                    <h2 class="text-2xl font-bold mb-2">Join a Session</h2>
+                    <label for="session-id-input" class="block text-sm font-medium text-gray-700 mb-1">Session ID</label>
+                    <input type="text" id="session-id-input" placeholder="Enter session ID..." class="w-full p-3 border rounded-md mb-4 focus:ring-2 focus:ring-green-500">
+                    <button id="join-session-btn" class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-lg">Join</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Page 3: Session Lobby Page -->
+    <div id="session-lobby-page" class="hidden min-h-screen flex items-center justify-center p-4">
+        <div class="w-full max-w-6xl bg-white p-8 rounded-2xl shadow-lg flex flex-col md:flex-row gap-8">
+            <!-- Left Panel: Spinner -->
+            <div class="flex-grow flex flex-col items-center justify-center">
+                <h1 class="text-5xl font-bold text-gray-800 mb-2">Name Spinner</h1>
+                <h2 id="spinner-subtitle" class="text-2xl text-center text-gray-500 mb-10">Waiting for host...</h2>
+                <div id="spinner-container" class="relative flex justify-center items-center">
+                    <canvas id="spinner-canvas" width="400" height="400"></canvas>
+                </div>
+                <button id="spin-btn" class="hidden mt-8 bg-purple-500 hover:bg-purple-600 text-white font-bold py-4 px-8 rounded-lg text-xl">SPIN!</button>
+            </div>
+            <!-- Right Panel: Session Info -->
+            <div class="w-full md:w-1/3 bg-gray-50 p-6 rounded-lg">
+                <h2 class="text-3xl font-bold mb-4">Session Info</h2>
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-500">Session ID</label>
+                    <p id="session-id-display" class="text-2xl font-mono bg-gray-200 p-2 rounded break-words"></p>
+                </div>
+                <h3 class="text-2xl font-bold mb-2">Players</h3>
+                <ul id="player-list" class="space-y-2"></ul>
+                <button id="leave-session-btn" class="w-full mt-8 bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-6 rounded-lg">Leave Session</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Page 4: Quiz Gameplay -->
+    <div id="game-page" class="hidden">
+        <div id="confetti-container"></div>
+        <div id="quiz-container" class="w-full max-w-7xl mx-auto p-6">
+            <h1 id="game-title" class="text-5xl font-bold text-center text-gray-800 mb-2"></h1>
+            <h2 id="game-subtitle" class="text-2xl text-center text-gray-500 mb-10"></h2>
+            <div id="game-board" class="flex justify-center items-center"></div>
+            <div id="main-controls" class="flex justify-center gap-4 my-10">
+                 <button id="random-pick-btn" class="hidden bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-lg">Pick a Random Question</button>
+                 <button id="next-question-btn" class="hidden bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-lg">Next Question</button>
+                 <button id="back-to-selection-btn" class="bg-gray-500 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg">Change Mode</button>
+                 <button id="edit-quiz-btn" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-lg">Edit Quiz</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Modals -->
+    <div id="modal-overlay" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 hidden">
+         <div class="bg-white p-8 rounded-2xl shadow-lg w-full max-w-lg text-center">
+             <h3 id="modal-question-number" class="text-xl font-bold text-gray-500 mb-4"></h3>
+             <p id="modal-question-text" class="text-2xl text-gray-800 mb-6"></p>
+             <div id="modal-answer-box" class="hidden text-2xl font-bold text-green-800 bg-green-100 p-4 rounded-lg"></div>
+             <div id="modal-controls" class="flex justify-center gap-4 mt-6">
+                 <button id="modal-show-answer-btn" class="bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-3 px-6 rounded-lg">Show Answer</button>
+                 <button id="modal-close-btn" class="bg-gray-500 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg">Close</button>
+             </div>
+         </div>
+    </div>
+    <div id="notification-modal" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50">
+        <div class="bg-white p-10 rounded-2xl shadow-2xl text-center">
+            <p id="notification-text" class="text-4xl font-bold text-purple-600 mb-6"></p>
+            <button id="notification-close-btn" class="bg-purple-500 hover:bg-purple-600 text-white font-bold py-2 px-8 rounded-lg">OK</button>
+        </div>
+    </div>
+    <div id="alert-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-white p-8 rounded-2xl shadow-2xl text-center w-full max-w-sm">
+            <p id="alert-text" class="text-xl text-gray-800 mb-6"></p>
+            <button id="alert-close-btn" class="bg-purple-500 hover:bg-purple-600 text-white font-bold py-2 px-8 rounded-lg">OK</button>
+        </div>
+    </div>
+
+</body>
+</html>
