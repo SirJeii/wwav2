@@ -80,16 +80,15 @@
             // --- App Initialization ---
             async function initializeFirebase() {
                 try {
-                    if (typeof __firebase_config === 'undefined' || !__firebase_config) {
-                        console.error("Firebase configuration is missing.");
-                        document.body.innerHTML = `<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative text-center m-8" role="alert">
-                            <strong class="font-bold">Configuration Error!</strong>
-                            <span class="block sm:inline">Application configuration is missing. Cannot connect to services.</span>
-                        </div>`;
-                        return;
-                    }
+                    const firebaseConfig = {
+                        apiKey: "AIzaSyCZNebG3fhWoK7ZtUyi2n1Qfv57SZ9clV8",
+                        authDomain: "vehicle-inventory-db.firebaseapp.com",
+                        projectId: "vehicle-inventory-db",
+                        storageBucket: "vehicle-inventory-db.appspot.com",
+                        messagingSenderId: "347915856121",
+                        appId: "1:347915856121:web:f2acf41f13a7862f2d9a28"
+                    };
 
-                    const firebaseConfig = JSON.parse(__firebase_config);
                     const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
                     app = initializeApp(firebaseConfig);
                     db = getFirestore(app);
@@ -492,7 +491,7 @@
                 quizData.forEach(q => {
                     const chest = document.createElement('div');
                     chest.className = 'treasure-chest text-5xl cursor-pointer transition-transform transform hover:scale-125';
-                    chest.textContent = '📦';
+                    chest.textContent = '�';
                     chest.dataset.id = q.id;
                     chest.addEventListener('click', () => {
                         displayQuestion(q.id);
@@ -812,3 +811,4 @@
 
 </body>
 </html>
+�
